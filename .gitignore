@@ -1,0 +1,23 @@
+# 生成文件
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+
+# 缓存模板（运行时生成，不提交）
+reference*.docx
+
+# 日志
+error.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 打包产物（体积大，单独发 Releases）
+*.zip
+*.exe

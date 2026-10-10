@@ -1,0 +1,8 @@
+pypandoc-binary
+xhtml2pdf
+pymupdf
+markdown
+python-docx
+sv-ttk
+pillow
+windnd
