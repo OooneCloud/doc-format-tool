@@ -5,7 +5,8 @@
 ## 功能特性
 
 - **Markdown 转 Word**：保持 Markdown 编辑器风格，支持代码高亮、表格自动调整、锚点链接
-- **Markdown 转 PDF**：支持锚点链接、分页、目录、书签
+- **Markdown 转 PDF**：浏览器排版引擎（Edge/Chrome 无头打印），GitHub 风格版式，
+  支持锚点链接、分页、页码、代码高亮，图片自动缩放
 - **PDF 转图片**：批量导出为 PNG/JPG，适合归档和分享
 - **无依赖**：免安装版无需 Python 环境即可使用
 - **多版本缓存**：保留每次转换样式设置，支持一键回退
@@ -36,11 +37,19 @@
 
 ### Markdown → Word/PDF 转换细节
 
+- **PDF 引擎**：优先调用系统已有的 Edge / Chrome 无头浏览器打印 PDF
+  （GitHub 风格 A4 版式、页脚页码、文内锚点可点击跳转），
+  没有 Edge/Chrome 时自动退回内置 xhtml2pdf 引擎
+- **图片**：PDF 中 `max-width: 100%` 自动缩放且不被跨页截断；
+  Word 中超宽图片等比缩到页宽以内并居中；本地/网络图片均自动嵌入
+- **标题锚点**：按 GitHub 规则生成（中文保留、标点删除、空格转连字符），
+  在 GitHub/VSCode 里写好的 `#跳转` 链接可直接使用
 - **行距**：1.25 倍行距
-- **表格**：列宽根据内容长度自动调整（中文=2字符宽，英文=1）
-- **代码块**：Consolas 字体，关键词红、字符串蓝、注释灰、数字蓝
-- **表格边框**：浅灰色 (#D0D7DE)，表头浅灰底 (#F6F8FA)
-- **标题**：GitHub README 风格，标题下浅灰下划线
+- **表格**：Word 列宽根据内容长度自动调整（中文=2字符宽，英文=1）；
+  PDF 斑马纹条纹行、表头灰底、跨页重复表头
+- **代码块**：Consolas 字体 + Pygments 语法高亮，浅灰底圆角卡片
+- **表格边框**：浅灰色 (#D1D9E0)，表头浅灰底 (#F6F8FA)
+- **标题**：GitHub README 风格，标题下浅灰下划线，标题不与正文断页
 - **超链接**：GitHub 蓝 (#0969DA)，无下划线
 - **引用块**：浅灰竖线和文字，边缘缩进
 - **分隔线**：浅灰细线
@@ -60,14 +69,17 @@ A：PDF 引擎不支持内部锚点，工具已自动将锚点转为纯文本。
 
 | 库 | 版本 | 用途 |
 |---|---|---|
-| pypandoc-binary | 最新 | Markdown 转 Word/PDF |
-| xhtml2pdf | 最新 | Markdown 转 PDF |
+| pypandoc-binary | 最新 | Markdown 转 Word |
+| xhtml2pdf | 最新 | Markdown 转 PDF（无浏览器时的兜底引擎） |
 | pymupdf | 最新 | PDF 导出图片 |
 | markdown | 最新 | Markdown 解析 |
+| pygments | 最新 | 代码语法高亮 |
 | python-docx | 最新 | Word 文档样式处理 |
 | sv-ttk | 最新 | 现代化 ttk 样式 |
 | pillow | 最新 | 图片处理（截图） |
 | windnd | 最新 | 文件拖拽 |
+
+PDF 转换另需系统安装 Microsoft Edge 或 Google Chrome（Windows 10/11 自带 Edge）。
 
 ## 开发说明
 

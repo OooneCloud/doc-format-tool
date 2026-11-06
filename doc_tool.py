@@ -18,11 +18,13 @@ import queue
 import hashlib
 import logging
 import shutil
+import subprocess
 import tempfile
 import threading
 import traceback
 import urllib.request
 from urllib.parse import urlparse
+from pathlib import Path as _Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -145,6 +147,30 @@ def _oxml_new(tag, **attrs):
     return el
 
 
+def _polish_docx(docx_path, log=print):
+    """转换后微调：超宽图片等比缩到页宽以内、独占段落的图片居中"""
+    import docx
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.shared import Emu
+    doc = docx.Document(docx_path)
+    max_w = Emu(int(16.5 * 360000))  # 16.5cm：A4 宽减去左右页边距再留余量
+    for shp in doc.inline_shapes:
+        try:
+            if shp.width and shp.width > max_w:
+                ratio = max_w / shp.width
+                shp.height = int(shp.height * ratio)
+                shp.width = int(max_w)
+        except Exception:
+            continue
+    for p in doc.paragraphs:
+        if p.text.strip():
+            continue
+        if p._element.findall(".//" + qn("w:drawing")):
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.save(docx_path)
+
+
 def md_file_to_docx(md_path, docx_path, log=print):
     """单个 md → docx，由 pandoc 完成转换，支持表格/代码块/图片/嵌套列表。
     本地图片（相对/绝对路径）与网络图片都会嵌入文档。
@@ -155,14 +181,15 @@ def md_file_to_docx(md_path, docx_path, log=print):
     ref = _ensure_reference_docx(log=log)
     if ref:
         extra.append("--reference-doc=%s" % ref)
+    tmp_docx = docx_path + ".converting"  # 先写临时文件，避免目标被占用时中途报错
     pypandoc.convert_file(
         md_path, "docx",
         format="markdown+east_asian_line_breaks",
-        outputfile=docx_path,
+        outputfile=tmp_docx,
         extra_args=extra,
     )
     try:
-        _style_docx_tables(docx_path)
+        _style_docx_tables(tmp_docx)
     except Exception:
         log("    提示：表格样式微调失败（不影响内容），详见 error.log")
         try:
@@ -170,6 +197,24 @@ def md_file_to_docx(md_path, docx_path, log=print):
                 ef.write("[表格样式] %s\n%s\n" % (docx_path, traceback.format_exc()))
         except Exception:
             pass
+    try:
+        _polish_docx(tmp_docx, log=log)
+    except Exception:
+        log("    提示：图片排版微调失败（不影响内容），详见 error.log")
+        try:
+            with open(ERROR_LOG, "a", encoding="utf-8") as ef:
+                ef.write("[图片排版] %s\n%s\n" % (docx_path, traceback.format_exc()))
+        except Exception:
+            pass
+    try:
+        shutil.move(tmp_docx, docx_path)
+    except PermissionError:
+        try:
+            os.remove(tmp_docx)
+        except OSError:
+            pass
+        raise RuntimeError("目标 Word 文档正被 Word/WPS 打开，"
+                           "请关闭它之后重新转换：%s" % docx_path)
 
 
 def _ensure_reference_docx(log=print):
@@ -541,6 +586,16 @@ def _prep_images(body, md_dir, log=print):
     return new_body, tmpdir
 
 
+def _github_slugify(value, separator):
+    """GitHub 风格的标题锚点 slug：小写、去标点、空格转连字符（保留中文）。
+    与 VSCode / GitHub 上生成的锚点一致，md 里手写的 #跳转链接才能命中。"""
+    value = value.strip().lower()
+    # 保留字母/数字/下划线/连字符/空白/中文等文字字符，其余（. , : （）等）删除
+    value = re.sub(r"[^\w\s\-]", "", value, flags=re.UNICODE)
+    value = re.sub(r"\s", separator, value)
+    return value
+
+
 def _md_to_html(md_path, log=print):
     import markdown as mdlib
     text = read_text_auto(md_path)
@@ -548,8 +603,16 @@ def _md_to_html(md_path, log=print):
     text = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.S)
     return mdlib.markdown(
         text,
-        extensions=["tables", "fenced_code", "sane_lists"],
-        output_format="xhtml",
+        extensions=["tables", "fenced_code", "sane_lists",
+                    # toc：给标题生成锚点 id（GitHub 风格），文内 #跳转链接可用
+                    # codehilite：pygments 代码语法高亮
+                    "toc", "codehilite"],
+        extension_configs={
+            "toc": {"slugify": _github_slugify, "separator": "-"},
+            "codehilite": {"guess_lang": False, "css_class": "codehilite",
+                           "linenums": False},
+        },
+        output_format="html5",
     )
 
 
@@ -596,8 +659,170 @@ def _sanitize_links(body):
     return new, count[0]
 
 
+def _find_browser():
+    """找一个可用的 Chromium 系浏览器（Edge / Chrome），找不到返回 None"""
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    lad = os.environ.get("LOCALAPPDATA", "")
+    candidates = [
+        os.path.join(pf, r"Google\Chrome\Application\chrome.exe"),
+        os.path.join(pf86, r"Microsoft\Edge\Application\msedge.exe"),
+        os.path.join(pf, r"Microsoft\Edge\Application\msedge.exe"),
+        os.path.join(lad, r"Google\Chrome\Application\chrome.exe"),
+        os.path.join(lad, r"Microsoft\Edge\Application\msedge.exe"),
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def _pdf_css():
+    """GitHub 风格的 A4 打印样式（浅色），附 pygments 代码高亮配色"""
+    try:
+        from pygments.formatters import HtmlFormatter
+        pyg_css = HtmlFormatter(style="friendly").get_style_defs(".codehilite")
+    except Exception:
+        pyg_css = ""
+    return """
+@page { size: A4 portrait; margin: 20mm 17mm 22mm 17mm;
+  @bottom-center { content: counter(page) " / " counter(pages);
+    font: 9pt "Segoe UI", "Microsoft YaHei", sans-serif; color: #8c959f; } }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 11pt; line-height: 1.7; color: #1f2328; margin: 0;
+  word-wrap: break-word; }
+h1, h2, h3, h4, h5, h6 { font-weight: 600; line-height: 1.3;
+  margin: 1.35em 0 .55em; break-after: avoid; page-break-after: avoid; }
+h1 { font-size: 1.85em; border-bottom: 1px solid #d1d9e0; padding-bottom: .3em; }
+h2 { font-size: 1.4em; border-bottom: 1px solid #d1d9e0; padding-bottom: .28em; }
+h3 { font-size: 1.18em; }
+h4 { font-size: 1.02em; }
+h5 { font-size: .92em; }
+h6 { font-size: .88em; color: #59636e; }
+p { margin: .6em 0; }
+a { color: #0969da; text-decoration: none; }
+strong, b { font-weight: 600; }
+img { max-width: 100%; max-height: 235mm; height: auto;
+  break-inside: avoid; page-break-inside: avoid; }
+hr { height: 1px; border: 0; background: #d1d9e0; margin: 1.4em 0; }
+blockquote { margin: .8em 0; padding: .05em 1em; color: #59636e;
+  border-left: .25em solid #d1d9e0; }
+blockquote p { margin: .35em 0; }
+pre { background: #f6f8fa; border-radius: 6px; padding: .8em 1em;
+  white-space: pre-wrap; word-wrap: break-word;
+  break-inside: avoid; page-break-inside: avoid;
+  font-size: 9.5pt; line-height: 1.5; }
+code, pre, kbd { font-family: Consolas, "Courier New", "Microsoft YaHei", monospace; }
+code { font-size: 87%; background: #f0f1f3; border-radius: 4px;
+  padding: .12em .35em; }
+pre code, .codehilite code { font-size: 100%; background: none; padding: 0; }
+.codehilite { background: #f6f8fa; border-radius: 6px;
+  break-inside: avoid; page-break-inside: avoid; }
+.codehilite pre { margin: 0; background: none; border: 0; }
+table { border-collapse: collapse; margin: .8em 0; font-size: 10pt;
+  display: table; width: auto; max-width: 100%; table-layout: auto; }
+th, td { border: 1px solid #d1d9e0; padding: 4px 10px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(2n) td { background: #fbfcfd; }
+tr { break-inside: avoid; }
+thead { display: table-header-group; }
+ul, ol { padding-left: 1.6em; margin: .45em 0; }
+li { margin: .18em 0; }
+li > p { margin: .3em 0; }
+del { color: #59636e; }
+""" + pyg_css
+
+
+def _absolutize_images(body, md_dir):
+    """把 HTML 里所有本地图片的 src 改写成绝对 file:// 地址：
+    打印用的临时 HTML 在系统临时目录里，相对路径会失联，必须绝对化。"""
+    def repl(m):
+        tag = m.group(0)
+        sm = re.search(r'src=["\']([^"\']+)["\']', tag)
+        if not sm:
+            return tag
+        src = sm.group(1)
+        if re.match(r"^(https?|data|file):", src, re.I):
+            return tag
+        p = src if os.path.isabs(src) else os.path.normpath(os.path.join(md_dir, src))
+        if os.path.exists(p):
+            uri = _Path(p).as_uri().replace("&", "&amp;")
+            tag = re.sub(r'src=["\'][^"\']+["\']', 'src="%s"' % uri, tag, count=1)
+        return tag
+    return re.sub(r"<img[^>]*>", repl, body, flags=re.I)
+
+
+def _wrap_html(body, css):
+    return ("<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<title>document</title><style>%s</style></head>"
+            "<body>%s</body></html>" % (css, body))
+
+
+def _install_pdf(tmp_pdf, pdf_path):
+    """把生成的 PDF 放到目标位置；被占用时给出人话提示"""
+    try:
+        if os.path.abspath(tmp_pdf) != os.path.abspath(pdf_path):
+            shutil.move(tmp_pdf, pdf_path)
+    except PermissionError:
+        raise RuntimeError("目标 PDF 正被其他程序打开（如阅读器），"
+                           "请关闭它之后重新转换：%s" % pdf_path)
+
+
+def _md_to_pdf_browser(md_path, pdf_path, log=print):
+    """浏览器排版引擎：md → GitHub 风格 HTML → 无头 Edge/Chrome 打印成 PDF。
+    中文换行、表格、文内锚点、代码高亮都由浏览器原生支持，图片自动缩放。"""
+    md_dir = os.path.dirname(os.path.abspath(md_path))
+    body = _md_to_html(md_path, log=log)
+    body, tmpdir = _prep_images(body, md_dir, log=log)
+    try:
+        body = _absolutize_images(body, md_dir)
+        html = _wrap_html(body, _pdf_css())
+        html_path = os.path.join(tmpdir, "print.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        out_tmp = os.path.join(tmpdir, "out.pdf")
+        profile = os.path.join(tmpdir, "profile")
+        cmd = [_find_browser(),
+               "--headless", "--disable-gpu", "--no-first-run",
+               "--disable-extensions", "--no-pdf-header-footer",
+               "--user-data-dir=" + profile,
+               "--virtual-time-budget=20000",
+               "--print-to-pdf=" + out_tmp,
+               _Path(html_path).as_uri()]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("浏览器渲染超时（180 秒），请检查文档/图片")
+        if not os.path.exists(out_tmp) or os.path.getsize(out_tmp) == 0:
+            err = (proc.stderr or b"").decode("utf-8", "replace")[-400:]
+            raise RuntimeError("浏览器未能生成 PDF %s" % err)
+        _install_pdf(out_tmp, pdf_path)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def md_file_to_pdf(md_path, pdf_path, log=print):
-    """单个 md → pdf：先转 HTML，再用 xhtml2pdf 排版为 A4 页面"""
+    """单个 md → pdf。优先浏览器排版引擎（效果最好），
+    没有 Edge/Chrome 或其失败时退回内置 xhtml2pdf 引擎。"""
+    if _find_browser():
+        try:
+            _md_to_pdf_browser(md_path, pdf_path, log=log)
+            return
+        except Exception:
+            log("    提示：浏览器排版引擎失败，改用内置引擎重试…（详见 error.log）")
+            try:
+                with open(ERROR_LOG, "a", encoding="utf-8") as ef:
+                    ef.write("[浏览器PDF引擎] %s\n%s\n"
+                             % (os.path.basename(md_path), traceback.format_exc()))
+            except Exception:
+                pass
+    _md_to_pdf_fallback(md_path, pdf_path, log=log)
+
+
+def _md_to_pdf_fallback(md_path, pdf_path, log=print):
+    """内置引擎兜底：markdown → HTML → xhtml2pdf 排版为 A4 页面"""
     from xhtml2pdf import pisa
     from xhtml2pdf import default as pisa_default
     logging.getLogger("xhtml2pdf").setLevel(logging.ERROR)
@@ -669,10 +894,11 @@ img { margin: 6pt 0; }
         except Exception:
             ctx = None
 
+        tmp_pdf = os.path.join(tmpdir, "fallback.pdf")
         try:
             if ctx:
                 ctx.__enter__()
-            with open(pdf_path, "wb") as f:
+            with open(tmp_pdf, "wb") as f:
                 status = pisa.CreatePDF(html, dest=f, path=md_dir + os.sep,
                                         encoding="utf-8", link_callback=link_callback)
         finally:
@@ -680,6 +906,7 @@ img { margin: 6pt 0; }
                 ctx.__exit__(None, None, None)
         if status.err:
             raise RuntimeError("PDF 生成失败，请检查 Markdown 内容（如特殊语法）")
+        _install_pdf(tmp_pdf, pdf_path)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -991,7 +1218,7 @@ class App(tk.Tk):
 
         self._nav_item(sb, "?", "使用说明", self._open_help, row=5)
 
-        tk.Label(sb, text="v1.9 · 免费离线", bg=C_SIDEBAR, fg="#a5a5a5",
+        tk.Label(sb, text="v2.0 · 免费离线", bg=C_SIDEBAR, fg="#a5a5a5",
                  font=(FONT, self.fs(8))).grid(row=6, column=0, sticky="w",
                                       padx=self.px(16), pady=(6, self.px(12)))
 
