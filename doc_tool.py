@@ -722,7 +722,7 @@ pre code, .codehilite code { font-size: 100%; background: none; padding: 0; }
   break-inside: avoid; page-break-inside: avoid; }
 .codehilite pre { margin: 0; background: none; border: 0; }
 table { border-collapse: collapse; margin: .8em auto; font-size: 10pt;
-  display: table; width: auto; max-width: 100%; table-layout: auto; }
+  display: table; width: 100%; max-width: 100%; table-layout: auto; }
 th, td { border: 1px solid #d1d9e0; padding: 4px 10px; text-align: left; }
 th { background: #f6f8fa; font-weight: 600; }
 tr:nth-child(2n) td { background: #fbfcfd; }
